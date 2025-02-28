@@ -1,7 +1,7 @@
 # PowerShell script to scan file or URL with VirusTotal
 param (
     [string]$target,          # File path or URL to scan
-    [string]$apiKey = "YOUR_VIRUSTOTAL_API_KEY"  # Replace with your VirusTotal API key
+    [string]$apiKey = "0748e2d02ac21d3b6d46ebd06448f403d4969dfb71cfbc1a5ebe34131be2d414"  # Replace with your VirusTotal API key
 )
 
 # Function to check if the target is a URL
