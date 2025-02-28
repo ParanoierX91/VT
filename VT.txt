@@ -1,0 +1,111 @@
+# VirusTotal API Checker Script
+param (
+    [Parameter(Mandatory=$false)]
+    [string]$File,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$Url
+)
+
+# Replace with your VirusTotal API key
+$apiKey = "0748e2d02ac21d3b6d46ebd06448f403d4969dfb71cfbc1a5ebe34131be2d414"
+
+# VirusTotal API endpoints
+$scanUrl = "https://www.virustotal.com/api/v3/files"
+$reportUrl = "https://www.virustotal.com/api/v3/analyses"
+$urlScanUrl = "https://www.virustotal.com/api/v3/urls"
+
+# Headers for API requests
+$headers = @{
+    "x-apikey" = $apiKey
+    "Accept" = "application/json"
+}
+
+function Get-FileHash {
+    param ([string]$File)
+    if (Test-Path $File) {
+        $hash = Get-FileHash -Path $File -Algorithm SHA256
+        return $hash.Hash
+    } else {
+        Write-Error "File not found: $File"
+        exit 1
+    }
+}
+
+function Check-VirusTotal {
+    param (
+        [string]$ResourceType,
+        [string]$Resource
+    )
+    
+    try {
+        if ($ResourceType -eq "file") {
+            # Prepare file for upload
+            $fileBytes = [System.IO.File]::ReadAllBytes($Resource)
+            $boundary = [System.Guid]::NewGuid().ToString()
+            $contentType = "multipart/form-data; boundary=$boundary"
+            
+            # Create multipart form data
+            $body = @"
+--$boundary
+Content-Disposition: form-data; name="file"; filename="scannedfile"
+Content-Type: application/octet-stream
+
+$([System.Text.Encoding]::UTF8.GetString($fileBytes))
+--$boundary--
+"@
+
+            # Submit file for scanning
+            $scanResponse = Invoke-RestMethod -Uri $scanUrl -Method Post -Headers $headers -Body $body -ContentType $contentType
+            $analysisId = $scanResponse.data.id
+        }
+        elseif ($ResourceType -eq "url") {
+            # Prepare URL for scanning
+            $body = @{
+                "url" = $Resource
+            }
+            $scanResponse = Invoke-RestMethod -Uri $urlScanUrl -Method Post -Headers $headers -Body ($body | ConvertTo-Json) -ContentType "application/json"
+            $analysisId = $scanResponse.data.id
+        }
+
+        # Wait a few seconds for analysis to complete
+        Start-Sleep -Seconds 15
+
+        # Get the report
+        $reportResponse = Invoke-RestMethod -Uri "$reportUrl/$analysisId" -Method Get -Headers $headers
+        
+        # Display results
+        $stats = $reportResponse.data.attributes.stats
+        Write-Host "`nScan Results:" -ForegroundColor Cyan
+        Write-Host "Malicious: $($stats.malicious)" -ForegroundColor Red
+        Write-Host "Suspicious: $($stats.suspicious)" -ForegroundColor Yellow
+        Write-Host "Harmless: $($stats.harmless)" -ForegroundColor Green
+        Write-Host "Undetected: $($stats.undetected)"
+        
+        if ($stats.malicious -gt 0) {
+            Write-Host "WARNING: Potential malware detected!" -ForegroundColor Red
+        }
+    }
+    catch {
+        Write-Error "Error: $($_.Exception.Message)"
+    }
+}
+
+# Main execution
+if ($File -and $Url) {
+    Write-Error "Please provide either a file path OR a URL, not both"
+    exit 1
+}
+elseif ($File) {
+    Write-Host "Scanning file: $File" -ForegroundColor Cyan
+    Check-VirusTotal -ResourceType "file" -Resource $File
+}
+elseif ($Url) {
+    Write-Host "Scanning URL: $Url" -ForegroundColor Cyan
+    Check-VirusTotal -ResourceType "url" -Resource $Url
+}
+else {
+    Write-Host "Usage examples:" -ForegroundColor Yellow
+    Write-Host "  Check a file: $($MyInvocation.MyCommand.Name) -File 'C:\path\to\file.exe'"
+    Write-Host "  Check a URL: $($MyInvocation.MyCommand.Name) -Url 'https://example.com'"
+}
