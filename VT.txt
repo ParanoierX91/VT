@@ -1,111 +1,89 @@
-# VirusTotal API Checker Script
+# PowerShell script to scan file or URL with VirusTotal
 param (
-    [Parameter(Mandatory=$false)]
-    [string]$File,
-    
-    [Parameter(Mandatory=$false)]
-    [string]$Url
+    [string]$target,          # File path or URL to scan
+    [string]$apiKey = "YOUR_VIRUSTOTAL_API_KEY"  # Replace with your VirusTotal API key
 )
 
-# Replace with your VirusTotal API key
-$apiKey = "0748e2d02ac21d3b6d46ebd06448f403d4969dfb71cfbc1a5ebe34131be2d414"
-
-# VirusTotal API endpoints
-$scanUrl = "https://www.virustotal.com/api/v3/files"
-$reportUrl = "https://www.virustotal.com/api/v3/analyses"
-$urlScanUrl = "https://www.virustotal.com/api/v3/urls"
-
-# Headers for API requests
-$headers = @{
-    "x-apikey" = $apiKey
-    "Accept" = "application/json"
+# Function to check if the target is a URL
+function Is-Url($string) {
+    return ($string -match "^(http|https)://")
 }
 
-function Get-FileHash {
-    param ([string]$File)
-    if (Test-Path $File) {
-        $hash = Get-FileHash -Path $File -Algorithm SHA256
+# Function to get file hash
+function Get-FileHashSHA256($filePath) {
+    if (Test-Path $filePath) {
+        $hash = Get-FileHash -Path $filePath -Algorithm SHA256
         return $hash.Hash
     } else {
-        Write-Error "File not found: $File"
+        Write-Error "File not found: $filePath"
         exit 1
     }
 }
 
-function Check-VirusTotal {
-    param (
-        [string]$ResourceType,
-        [string]$Resource
-    )
-    
-    try {
-        if ($ResourceType -eq "file") {
-            # Prepare file for upload
-            $fileBytes = [System.IO.File]::ReadAllBytes($Resource)
-            $boundary = [System.Guid]::NewGuid().ToString()
-            $contentType = "multipart/form-data; boundary=$boundary"
-            
-            # Create multipart form data
-            $body = @"
---$boundary
-Content-Disposition: form-data; name="file"; filename="scannedfile"
-Content-Type: application/octet-stream
-
-$([System.Text.Encoding]::UTF8.GetString($fileBytes))
---$boundary--
-"@
-
-            # Submit file for scanning
-            $scanResponse = Invoke-RestMethod -Uri $scanUrl -Method Post -Headers $headers -Body $body -ContentType $contentType
-            $analysisId = $scanResponse.data.id
-        }
-        elseif ($ResourceType -eq "url") {
-            # Prepare URL for scanning
-            $body = @{
-                "url" = $Resource
-            }
-            $scanResponse = Invoke-RestMethod -Uri $urlScanUrl -Method Post -Headers $headers -Body ($body | ConvertTo-Json) -ContentType "application/json"
-            $analysisId = $scanResponse.data.id
-        }
-
-        # Wait a few seconds for analysis to complete
-        Start-Sleep -Seconds 15
-
-        # Get the report
-        $reportResponse = Invoke-RestMethod -Uri "$reportUrl/$analysisId" -Method Get -Headers $headers
-        
-        # Display results
-        $stats = $reportResponse.data.attributes.stats
-        Write-Host "`nScan Results:" -ForegroundColor Cyan
-        Write-Host "Malicious: $($stats.malicious)" -ForegroundColor Red
-        Write-Host "Suspicious: $($stats.suspicious)" -ForegroundColor Yellow
-        Write-Host "Harmless: $($stats.harmless)" -ForegroundColor Green
-        Write-Host "Undetected: $($stats.undetected)"
-        
-        if ($stats.malicious -gt 0) {
-            Write-Host "WARNING: Potential malware detected!" -ForegroundColor Red
-        }
-    }
-    catch {
-        Write-Error "Error: $($_.Exception.Message)"
-    }
-}
-
 # Main execution
-if ($File -and $Url) {
-    Write-Error "Please provide either a file path OR a URL, not both"
+try {
+    # Validate input
+    if (-not $target) {
+        Write-Error "Please provide a file path or URL to scan using -target parameter"
+        exit 1
+    }
+    
+    if (-not $apiKey -or $apiKey -eq "YOUR_VIRUSTOTAL_API_KEY") {
+        Write-Error "Please provide a valid VirusTotal API key"
+        exit 1
+    }
+
+    # VirusTotal API endpoints
+    $baseUri = "https://www.virustotal.com/api/v3"
+    $headers = @{
+        "x-apikey" = $apiKey
+        "Accept" = "application/json"
+    }
+
+    if (Is-Url $target) {
+        # URL scanning
+        $body = @{
+            "url" = $target
+        }
+        $response = Invoke-RestMethod -Uri "$baseUri/urls" -Method Post -Headers $headers -Body ($body | ConvertTo-Json) -ContentType "application/json"
+        
+        # Get analysis results
+        $analysisId = $response.data.id
+        $analysisUri = "$baseUri/analyses/$analysisId"
+        Start-Sleep -Seconds 5  # Wait for analysis to complete
+        $results = Invoke-RestMethod -Uri $analysisUri -Method Get -Headers $headers
+        
+    } else {
+        # File scanning - first get the file hash
+        $fileHash = Get-FileHashSHA256 $target
+        $scanUri = "$baseUri/files/$fileHash"
+        
+        # Check if file already has a report
+        $results = Invoke-RestMethod -Uri $scanUri -Method Get -Headers $headers
+    }
+
+    # Process and display results
+    $stats = $results.data.attributes.last_analysis_stats
+    Write-Host "VirusTotal Scan Results for: $target" -ForegroundColor Cyan
+    Write-Host "--------------------------------"
+    Write-Host "Malicious: $($stats.malicious)" -ForegroundColor Red
+    Write-Host "Suspicious: $($stats.suspicious)" -ForegroundColor Yellow
+    Write-Host "Undetected: $($stats.undetected)"
+    Write-Host "Harmless: $($stats.harmless)" -ForegroundColor Green
+    
+    # Detailed results from each engine
+    Write-Host "`nDetailed Scan Results:" -ForegroundColor Cyan
+    $results.data.attributes.last_analysis_results | ForEach-Object {
+        $engine = $_.PSObject.Properties.Name
+        $result = $_.PSObject.Properties.Value.result
+        if ($result -eq "malicious") {
+            Write-Host "$engine : $result" -ForegroundColor Red
+        } elseif ($result -eq "suspicious") {
+            Write-Host "$engine : $result" -ForegroundColor Yellow
+        }
+    }
+
+} catch {
+    Write-Error "Error occurred: $($_.Exception.Message)"
     exit 1
-}
-elseif ($File) {
-    Write-Host "Scanning file: $File" -ForegroundColor Cyan
-    Check-VirusTotal -ResourceType "file" -Resource $File
-}
-elseif ($Url) {
-    Write-Host "Scanning URL: $Url" -ForegroundColor Cyan
-    Check-VirusTotal -ResourceType "url" -Resource $Url
-}
-else {
-    Write-Host "Usage examples:" -ForegroundColor Yellow
-    Write-Host "  Check a file: $($MyInvocation.MyCommand.Name) -File 'C:\path\to\file.exe'"
-    Write-Host "  Check a URL: $($MyInvocation.MyCommand.Name) -Url 'https://example.com'"
 }
